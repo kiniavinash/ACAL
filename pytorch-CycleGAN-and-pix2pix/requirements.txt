@@ -1,0 +1,12 @@
+torch>=0.4.1
+torchvision>=0.2.1
+dominate>=2.3.1
+visdom>=0.1.8.3
+
+pandas~=1.0.3
+pillow~=7.1.2
+numpy~=1.18.1
+requests~=2.23.0
+scipy~=1.4.1
+imageio~=2.8.0
+tqdm~=4.46.0
