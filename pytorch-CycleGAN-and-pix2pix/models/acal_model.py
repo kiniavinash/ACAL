@@ -41,7 +41,7 @@ class AcalModel(BaseModel):
                                 help='specify source task specific model architecture [lenet | ... ]')
             parser.add_argument('--source_model', required=True, type=str,
                                 help='path to the pre-trained source model')
-            parser.add_argument('--lr_task', type=float, default=0.001,
+            parser.add_argument('--lr_task', type=float, default=0.03,
                                 help='initial learning rate for task specific model')
         return parser
 
@@ -53,7 +53,7 @@ class AcalModel(BaseModel):
         """
         BaseModel.__init__(self, opt)
         # specify the training losses you want to print out. The training/test scripts will call <BaseModel.get_current_losses>
-        self.loss_names = ['D_A', 'G_A', 'cycle_A', 'task_A' 'D_B', 'G_B', 'cycle_B', 'task_B']
+        self.loss_names = ['D_A', 'G_A', 'cycle_A', 'task_A', 'D_B', 'G_B', 'cycle_B', 'task_B']
         # specify the images you want to save/display. The training/test scripts will call <BaseModel.get_current_visuals>
         visual_names_A = ['real_A', 'fake_B', 'rec_A']
         visual_names_B = ['real_B', 'fake_A', 'rec_B']
@@ -93,8 +93,8 @@ class AcalModel(BaseModel):
                                                 lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizer_D = torch.optim.Adam(itertools.chain(self.netD_A.parameters(), self.netD_B.parameters()),
                                                 lr=opt.lr, betas=(opt.beta1, 0.999))
-            self.optimizer_M = torch.optim.Adam(itertools.chain(self.netM_A.parameters(), self.netM_B.parameters()),
-                                                lr=opt.lr_task, betas=(0.5, 0.999))
+            self.optimizer_M = torch.optim.SGD(itertools.chain(self.netM_A.parameters(), self.netM_B.parameters()),
+                                                lr=opt.lr_task)
             self.optimizers.append(self.optimizer_G)
             self.optimizers.append(self.optimizer_D)
             self.optimizers.append(self.optimizer_M)
@@ -123,9 +123,9 @@ class AcalModel(BaseModel):
 
         if self.isTrain:
             self.labelH_real_A = self.netM_A(self.real_A)  # M_A(A)
-            self.labelH_fake_A = self.netM_A(self.fake_A)  # M_A(G_A(A))
+            self.labelH_fake_A = self.netM_A(self.fake_A)  # M_A(G_B(B))
             self.labelH_real_B = self.netM_B(self.real_B)  # M_B(B)
-            self.labelH_fake_B = self.netM_B(self.fake_B)  # M_B(G_B(B))
+            self.labelH_fake_B = self.netM_B(self.fake_B)  # M_B(G_A(A))
 
             self.labelH_rec_A = self.netM_A(self.rec_A)  # M_A(G_B(G_A(A))
             self.labelH_rec_B = self.netM_B(self.rec_B)  # M_B(G_A(G_B(B))
@@ -151,19 +151,19 @@ class AcalModel(BaseModel):
         loss_task = self.criterionTask(netM(real), labels)
         # Combined loss and calculate gradients
         loss_D = (loss_D_real + loss_D_fake) * 0.5
-        loss_D += loss_task  # TODO: is loss_task required here?
+        # loss_D += loss_task * 0.5 # TODO: is loss_task required here?
         loss_D.backward()
         return loss_D
 
     def backward_D_A(self):
         """Calculate GAN loss for discriminator D_A"""
         fake_B = self.fake_B_pool.query(self.fake_B)
-        self.loss_D_A = self.backward_D_basic(self.netD_A, self.real_B, fake_B, self.netM_A, self.labels_A)
+        self.loss_D_A = self.backward_D_basic(self.netD_A, self.real_B, fake_B, self.netM_B, self.labels_B)
 
     def backward_D_B(self):
         """Calculate GAN loss for discriminator D_B"""
         fake_A = self.fake_A_pool.query(self.fake_A)
-        self.loss_D_B = self.backward_D_basic(self.netD_B, self.real_A, fake_A, self.netM_B, self.labels_B)
+        self.loss_D_B = self.backward_D_basic(self.netD_B, self.real_A, fake_A, self.netM_A, self.labels_A)
 
     def backward_G(self):
         """Calculate the loss for generators G_A and G_B"""
@@ -187,7 +187,7 @@ class AcalModel(BaseModel):
                       self.loss_cycle_A + self.loss_cycle_B
         self.loss_G.backward()
 
-    def backward_M_basic(self, label_hat_real, label_real):  # , label_hat_fake,  label_fake):
+    def backward_M_basic(self, label_hat_real, label_real, label_hat_fake,  label_fake):
         """Calculate task loss for the task-specific models
 
         Parameters
@@ -196,25 +196,31 @@ class AcalModel(BaseModel):
         Return the task-specific loss.
         We also call loss_M.backward() to calculate the gradients.
         """
-        # loss_M_real = self.criterionTask(label_hat_real, label_real)
-        # loss_M_fake = self.criterionTask(label_hat_fake, label_fake)
-        # loss_M = (loss_M_real + loss_M_fake) * 0.5
-        loss_M = self.criterionTask(label_hat_real, label_real)
-        loss_M.backward()
+        loss_M_real = self.criterionTask(label_hat_real, label_real)
+        loss_M_fake = self.criterionTask(label_hat_fake, label_fake)
+        loss_M = (loss_M_real + loss_M_fake) * 0.5
+        # loss_M = self.criterionTask(label_hat_real, label_real)
+        loss_M.backward(retain_graph=True)
         return loss_M
 
     def backward_M_A(self):
         """Calculate the loss for M_A"""
-        self.loss_task_A = self.backward_M_basic(self.labelH_real_A,  self.labels_A)  #, self.labelH_fake_A, self.labels_B)
+        self.loss_task_A = self.backward_M_basic(self.labelH_real_A,  self.labels_A, self.labelH_fake_A, self.labels_B)
 
     def backward_M_B(self):
         """Calculate the loss for M_B"""
-        self.loss_task_B = self.backward_M_basic(self.labelH_real_B, self.labels_B)  #, self.labelH_fake_B,  self.labels_A)
+        self.loss_task_B = self.backward_M_basic(self.labelH_real_B, self.labels_B, self.labelH_fake_B,  self.labels_A)
 
     def optimize_parameters(self):
         """Calculate losses, gradients, and update network weights; called in every training iteration"""
         # forward
         self.forward()  # compute fake images and reconstruction images.
+        # M_A and M_B
+        self.set_requires_grad([self.netD_A, self.netD_B], False)
+        self.optimizer_M.zero_grad()
+        self.backward_M_A()
+        self.backward_M_B()
+        self.optimizer_M.step()
         # G_A and G_B
         self.set_requires_grad([self.netD_A, self.netD_B], False)  # Ds require no gradients when optimizing Gs
         self.optimizer_G.zero_grad()  # set G_A and G_B's gradients to zero
@@ -227,9 +233,3 @@ class AcalModel(BaseModel):
         self.backward_D_A()  # calculate gradients for D_A
         self.backward_D_B()  # calculate gradients for D_B
         self.optimizer_D.step()  # update D_A and D_B's weights
-        # M_A and M_B
-        self.set_requires_grad([self.netD_A, self.netD_B], False)
-        self.optimizer_M.zero_grad()
-        self.backward_M_A()
-        self.backward_M_B()
-        self.optimizer_M.step()
